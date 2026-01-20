@@ -356,14 +356,221 @@ app.post('/find-multi-availability', async (req, res) => {
   }
 });
 
+/**
+ * POST /find-group-availability
+ *
+ * For group bookings with DIFFERENT services - returns availability per service
+ * so the agent can find compatible back-to-back times.
+ *
+ * Body:
+ * {
+ *   "services": ["skin_fade", "long_locks"],  // One service per guest
+ *   "specific_date": "2026-01-21",            // Or use date_start/date_end
+ *   "time_preference": "morning" | "afternoon" | "any"
+ * }
+ *
+ * Returns availability for EACH service separately, plus suggested back-to-back pairs
+ */
+app.post('/find-group-availability', async (req, res) => {
+  const {
+    services,
+    date_start,
+    date_end,
+    specific_date,
+    time_preference,
+    location_id
+  } = req.body;
+
+  const locationId = location_id || CONFIG.LOCATION_ID;
+
+  if (!services || !Array.isArray(services) || services.length < 2) {
+    return res.json({
+      success: false,
+      error: 'services array required with at least 2 services (one per guest)'
+    });
+  }
+
+  const serviceIds = services.map(s => resolveServiceId(s));
+  const serviceNames = services.map(s => s.toLowerCase().replace(/_/g, ' '));
+
+  if (serviceIds.some(id => !id)) {
+    return res.json({
+      success: false,
+      error: 'Invalid service name(s) provided'
+    });
+  }
+
+  let startDate, endDate;
+  if (specific_date) {
+    startDate = specific_date;
+    endDate = specific_date;
+  } else if (date_start && date_end) {
+    startDate = date_start;
+    endDate = date_end;
+  } else {
+    const today = new Date();
+    const threeDaysLater = new Date();
+    threeDaysLater.setDate(today.getDate() + 3);
+    startDate = today.toISOString().split('T')[0];
+    endDate = threeDaysLater.toISOString().split('T')[0];
+  }
+
+  console.log(`PRODUCTION: Finding group availability for ${services.length} different services`);
+  console.log(`Services: ${services.join(', ')}`);
+  console.log(`Date range: ${startDate} to ${endDate}`);
+
+  try {
+    const token = await getMeevoToken();
+
+    // Search availability for EACH service separately
+    const availabilityByService = {};
+
+    for (let i = 0; i < serviceIds.length; i++) {
+      const serviceId = serviceIds[i];
+      const serviceName = serviceNames[i];
+
+      const scanPromises = ALL_STYLISTS.map(stylist =>
+        scanStylistAvailability(token, stylist, serviceId, startDate, endDate, locationId)
+      );
+      const results = await Promise.all(scanPromises);
+      let openings = results.flat();
+
+      // Apply time preference filter
+      if (time_preference === 'morning') {
+        openings = openings.filter(o => {
+          const hour = parseInt(o.startTime.split('T')[1].split(':')[0]);
+          return hour < 12;
+        });
+      } else if (time_preference === 'afternoon') {
+        openings = openings.filter(o => {
+          const hour = parseInt(o.startTime.split('T')[1].split(':')[0]);
+          return hour >= 12;
+        });
+      }
+
+      // Sort by time
+      openings.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+      availabilityByService[serviceName] = openings.slice(0, 20).map(o => ({
+        time: o.startTime,
+        end_time: o.endTime,
+        stylist_id: o.employee_id,
+        stylist_name: o.employee_nickname || o.employee_name,
+        price: o.price
+      }));
+    }
+
+    // Find back-to-back pairs where service A ends and service B can start
+    const backToBackOptions = [];
+    const service1Slots = availabilityByService[serviceNames[0]] || [];
+    const service2Slots = availabilityByService[serviceNames[1]] || [];
+
+    for (const slot1 of service1Slots.slice(0, 10)) {
+      // Find service 2 slots that start at or after slot1 ends
+      const slot1End = new Date(slot1.end_time);
+
+      for (const slot2 of service2Slots) {
+        const slot2Start = new Date(slot2.time);
+        const timeDiff = (slot2Start - slot1End) / (1000 * 60); // minutes difference
+
+        // Back-to-back: slot2 starts within 30 mins of slot1 ending
+        if (timeDiff >= 0 && timeDiff <= 30) {
+          backToBackOptions.push({
+            guest1: {
+              service: serviceNames[0],
+              time: slot1.time,
+              end_time: slot1.end_time,
+              stylist_id: slot1.stylist_id,
+              stylist_name: slot1.stylist_name
+            },
+            guest2: {
+              service: serviceNames[1],
+              time: slot2.time,
+              end_time: slot2.end_time,
+              stylist_id: slot2.stylist_id,
+              stylist_name: slot2.stylist_name
+            },
+            gap_minutes: Math.round(timeDiff)
+          });
+        }
+      }
+    }
+
+    // Sort back-to-back options by first slot time
+    backToBackOptions.sort((a, b) => new Date(a.guest1.time) - new Date(b.guest1.time));
+
+    // Check for same-time options (different stylists, same start time)
+    const sameTimeOptions = [];
+    for (const slot1 of service1Slots.slice(0, 10)) {
+      for (const slot2 of service2Slots) {
+        if (slot1.time === slot2.time && slot1.stylist_id !== slot2.stylist_id) {
+          sameTimeOptions.push({
+            time: slot1.time,
+            guest1: {
+              service: serviceNames[0],
+              stylist_id: slot1.stylist_id,
+              stylist_name: slot1.stylist_name
+            },
+            guest2: {
+              service: serviceNames[1],
+              stylist_id: slot2.stylist_id,
+              stylist_name: slot2.stylist_name
+            }
+          });
+        }
+      }
+    }
+
+    const hasSameTime = sameTimeOptions.length > 0;
+    const hasBackToBack = backToBackOptions.length > 0;
+
+    console.log(`PRODUCTION: Found ${sameTimeOptions.length} same-time options, ${backToBackOptions.length} back-to-back options`);
+
+    return res.json({
+      success: true,
+      services_searched: serviceNames,
+      date_range: { start: startDate, end: endDate },
+
+      // Same-time options (if any)
+      same_time_available: hasSameTime,
+      same_time_options: sameTimeOptions.slice(0, 5),
+
+      // Back-to-back options
+      back_to_back_available: hasBackToBack,
+      back_to_back_options: backToBackOptions.slice(0, 5),
+
+      // Raw availability per service (for agent reference)
+      availability_by_service: availabilityByService,
+
+      message: hasSameTime
+        ? `Found ${sameTimeOptions.length} same-time slots and ${backToBackOptions.length} back-to-back options`
+        : hasBackToBack
+          ? `No same-time slots available. Found ${backToBackOptions.length} back-to-back options`
+          : 'No compatible slots found for these services'
+    });
+
+  } catch (error) {
+    console.error('PRODUCTION Error:', error);
+    return res.json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Find Multi-Availability',
-    version: '1.0.0',
-    features: ['concurrent multi-stylist availability', 'time preference filter'],
+    version: '1.1.0',
+    features: [
+      'concurrent multi-stylist availability',
+      'multi-service group availability',
+      'back-to-back slot finder',
+      'time preference filter'
+    ],
     stylists_count: ALL_STYLISTS.length
   });
 });
