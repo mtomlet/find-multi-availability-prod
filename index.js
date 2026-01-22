@@ -78,6 +78,57 @@ function getStylistById(id) {
   return ALL_STYLISTS.find(s => s.id === id);
 }
 
+// ============================================
+// DATE FORMATTING HELPERS
+// Pre-formatted strings so LLM doesn't do date math
+// ============================================
+
+const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December'];
+
+function getOrdinalSuffix(day) {
+  if (day > 3 && day < 21) return 'th';
+  switch (day % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
+}
+
+function formatDateParts(dateString) {
+  const date = new Date(dateString + (dateString.includes('T') ? '' : 'T12:00:00'));
+  const dayOfWeek = DAYS_OF_WEEK[date.getUTCDay()];
+  const month = MONTHS[date.getUTCMonth()];
+  const dayNum = date.getUTCDate();
+  const dayWithSuffix = `${dayNum}${getOrdinalSuffix(dayNum)}`;
+  return {
+    day_of_week: dayOfWeek,
+    formatted_date: `${month} ${dayWithSuffix}`,
+    formatted_full_date: `${dayOfWeek}, ${month} ${dayWithSuffix}`
+  };
+}
+
+function formatTime(timeString) {
+  const timePart = timeString.split('T')[1];
+  if (!timePart) return 'Time unavailable';
+  const [hourStr, minStr] = timePart.split(':');
+  let hours = parseInt(hourStr, 10);
+  const minutes = parseInt(minStr, 10);
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  const minutesStr = minutes < 10 ? '0' + minutes : minutes;
+  return `${hours}:${minutesStr} ${ampm}`;
+}
+
+function formatSlotFull(timeString) {
+  const dateParts = formatDateParts(timeString);
+  const formattedTime = formatTime(timeString);
+  return `${dateParts.formatted_full_date} at ${formattedTime}`;
+}
+
 let cachedToken = null;
 let tokenExpiry = null;
 
@@ -124,17 +175,25 @@ async function scanStylistAvailability(token, stylist, serviceId, startDate, end
 
     const rawData = response.data?.data || [];
     return rawData.flatMap(item =>
-      (item.serviceOpenings || []).map(slot => ({
-        startTime: slot.startTime,
-        endTime: slot.endTime,
-        date: slot.date,
-        employee_id: stylist.id,
-        employee_name: stylist.name,
-        employee_nickname: stylist.nickname,
-        serviceId: slot.serviceId,
-        serviceName: slot.serviceName,
-        price: slot.employeePrice
-      }))
+      (item.serviceOpenings || []).map(slot => {
+        const dateParts = formatDateParts(slot.startTime);
+        const formattedTime = formatTime(slot.startTime);
+        return {
+          startTime: slot.startTime,
+          endTime: slot.endTime,
+          date: slot.date,
+          employee_id: stylist.id,
+          employee_name: stylist.name,
+          employee_nickname: stylist.nickname,
+          serviceId: slot.serviceId,
+          serviceName: slot.serviceName,
+          price: slot.employeePrice,
+          day_of_week: dateParts.day_of_week,
+          formatted_date: dateParts.formatted_date,
+          formatted_time: formattedTime,
+          formatted_full: `${dateParts.formatted_full_date} at ${formattedTime}`
+        };
+      })
     );
   } catch (error) {
     console.error(`PRODUCTION: Error scanning ${stylist.name}:`, error.message);
@@ -309,8 +368,14 @@ app.post('/find-multi-availability', async (req, res) => {
           if (time_preference === 'morning' && hour >= 12) continue;
           if (time_preference === 'afternoon' && hour < 12) continue;
 
+          const slotDateParts = formatDateParts(startTime);
+          const slotFormattedTime = formatTime(startTime);
           concurrentSlots.push({
             start_time: startTime,
+            day_of_week: slotDateParts.day_of_week,
+            formatted_date: slotDateParts.formatted_date,
+            formatted_time: slotFormattedTime,
+            formatted_full: `${slotDateParts.formatted_full_date} at ${slotFormattedTime}`,
             assignments: assignments,
             total_price: assignments.reduce((sum, a) => sum + (a.price || 0), 0)
           });
@@ -344,7 +409,7 @@ app.post('/find-multi-availability', async (req, res) => {
       total_concurrent_slots: concurrentSlots.length,
       all_slots: concurrentSlots.slice(0, 10),  // Return top 10 options
       date_range: { start: startDate, end: endDate },
-      message: `Found ${concurrentSlots.length} time slots where ${guestCount} guests can get haircuts at the same time with different stylists`
+      message: `Found ${concurrentSlots.length} time slots where ${guestCount} guests can get haircuts at the same time. Earliest: ${earliest.formatted_full}`
     });
 
   } catch (error) {
@@ -456,7 +521,11 @@ app.post('/find-group-availability', async (req, res) => {
         end_time: o.endTime,
         stylist_id: o.employee_id,
         stylist_name: o.employee_nickname || o.employee_name,
-        price: o.price
+        price: o.price,
+        day_of_week: o.day_of_week,
+        formatted_date: o.formatted_date,
+        formatted_time: o.formatted_time,
+        formatted_full: o.formatted_full
       }));
     }
 
@@ -564,12 +633,13 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Find Multi-Availability',
-    version: '1.1.0',
+    version: '1.2.0',
     features: [
       'concurrent multi-stylist availability',
       'multi-service group availability',
       'back-to-back slot finder',
-      'time preference filter'
+      'time preference filter',
+      'formatted date fields (day_of_week, formatted_date, formatted_time, formatted_full)'
     ],
     stylists_count: ALL_STYLISTS.length
   });
