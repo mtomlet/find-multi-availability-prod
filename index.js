@@ -206,7 +206,7 @@ async function scanStylistAvailability(token, stylist, serviceId, startDate, end
  *
  * Body:
  * {
- *   "services": ["haircut_standard", "haircut_skin_fade"],  // One service per guest
+ *   "services": ["haircut_standard", "haircut_skin_fade"],  // One service per guest (or just one for single person)
  *   "date_start": "2026-01-20",
  *   "date_end": "2026-01-22",
  *   "time_preference": "morning" | "afternoon" | "any",  // Optional
@@ -214,6 +214,7 @@ async function scanStylistAvailability(token, stylist, serviceId, startDate, end
  * }
  *
  * Returns concurrent slots where N different stylists are available at the same time
+ * Also works for single guest (1 service)
  */
 app.post('/find-multi-availability', async (req, res) => {
   const {
@@ -228,10 +229,10 @@ app.post('/find-multi-availability', async (req, res) => {
 
   const locationId = location_id || CONFIG.LOCATION_ID;
 
-  if (!services || !Array.isArray(services) || services.length < 2) {
+  if (!services || !Array.isArray(services) || services.length < 1) {
     return res.json({
       success: false,
-      error: 'services array required with at least 2 services (one per guest)'
+      error: 'services array required with at least 1 service'
     });
   }
 
@@ -426,10 +427,11 @@ app.post('/find-multi-availability', async (req, res) => {
  *
  * For group bookings with DIFFERENT services - returns availability per service
  * so the agent can find compatible back-to-back times.
+ * Also works for single guest (1 service).
  *
  * Body:
  * {
- *   "services": ["skin_fade", "long_locks"],  // One service per guest
+ *   "services": ["skin_fade", "long_locks"],  // One service per guest (or just one for single person)
  *   "specific_date": "2026-01-21",            // Or use date_start/date_end
  *   "time_preference": "morning" | "afternoon" | "any"
  * }
@@ -448,10 +450,10 @@ app.post('/find-group-availability', async (req, res) => {
 
   const locationId = location_id || CONFIG.LOCATION_ID;
 
-  if (!services || !Array.isArray(services) || services.length < 2) {
+  if (!services || !Array.isArray(services) || services.length < 1) {
     return res.json({
       success: false,
-      error: 'services array required with at least 2 services (one per guest)'
+      error: 'services array required with at least 1 service'
     });
   }
 
@@ -633,7 +635,7 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Find Multi-Availability',
-    version: '1.2.0',
+    version: '1.3.0',
     features: [
       'concurrent multi-stylist availability',
       'multi-service group availability',
