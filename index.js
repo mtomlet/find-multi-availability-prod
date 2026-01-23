@@ -56,8 +56,8 @@ async function getActiveEmployees(authToken) {
       .filter(emp => !['home', 'training', 'test'].includes((emp.firstName || '').toLowerCase()))
       .map(emp => ({
         id: emp.id,
-        name: emp.nickname || emp.firstName,
-        nickname: emp.nickname || emp.firstName
+        name: emp.nickName || emp.firstName,
+        nickname: emp.nickName || emp.firstName
       }));
 
     employeeCacheExpiry = Date.now() + EMPLOYEE_CACHE_TTL;
