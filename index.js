@@ -571,7 +571,7 @@ app.post('/find-group-availability', async (req, res) => {
       // Sort by time
       openings.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
 
-      availabilityByService[serviceName] = openings.slice(0, 20).map(o => ({
+      availabilityByService[serviceName] = openings.slice(0, 100).map(o => ({
         time: o.startTime,
         end_time: o.endTime,
         stylist_id: o.employee_id,
